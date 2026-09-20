@@ -1,0 +1,148 @@
+{
+  "totals": {
+    "cases": 8,
+    "recallTop5": 0.9,
+    "recallTop10": 0.9,
+    "flagRecall": 1,
+    "flagPrecision": 1
+  },
+  "results": [
+    {
+      "name": "clean-mechanical",
+      "score": {
+        "mustRead": 0,
+        "inTop5": 0,
+        "inTop10": 0,
+        "ranks": [],
+        "expectedFlags": 0,
+        "truePositives": 0,
+        "falsePositives": [],
+        "missedFlags": [],
+        "unlabelled": []
+      },
+      "costUsd": 0.001578834
+    },
+    {
+      "name": "destructive-migration",
+      "score": {
+        "mustRead": 1,
+        "inTop5": 1,
+        "inTop10": 1,
+        "ranks": [
+          1
+        ],
+        "expectedFlags": 1,
+        "truePositives": 1,
+        "falsePositives": [],
+        "missedFlags": [],
+        "unlabelled": []
+      },
+      "costUsd": 0.0025617240000000005
+    },
+    {
+      "name": "loosened-test",
+      "score": {
+        "mustRead": 2,
+        "inTop5": 2,
+        "inTop10": 2,
+        "ranks": [
+          2,
+          1
+        ],
+        "expectedFlags": 1,
+        "truePositives": 1,
+        "falsePositives": [],
+        "missedFlags": [],
+        "unlabelled": []
+      },
+      "costUsd": 0.00303128
+    },
+    {
+      "name": "real-stale-run-guard",
+      "score": {
+        "mustRead": 3,
+        "inTop5": 2,
+        "inTop10": 2,
+        "ranks": [
+          4,
+          3,
+          14
+        ],
+        "expectedFlags": 0,
+        "truePositives": 0,
+        "falsePositives": [],
+        "missedFlags": [],
+        "unlabelled": []
+      },
+      "costUsd": 0.001844058
+    },
+    {
+      "name": "refactor-drops-tenant-filter",
+      "score": {
+        "mustRead": 1,
+        "inTop5": 1,
+        "inTop10": 1,
+        "ranks": [
+          1
+        ],
+        "expectedFlags": 1,
+        "truePositives": 1,
+        "falsePositives": [],
+        "missedFlags": [],
+        "unlabelled": []
+      },
+      "costUsd": 0.002554516
+    },
+    {
+      "name": "secret-as-default",
+      "score": {
+        "mustRead": 1,
+        "inTop5": 1,
+        "inTop10": 1,
+        "ranks": [
+          1
+        ],
+        "expectedFlags": 1,
+        "truePositives": 1,
+        "falsePositives": [],
+        "missedFlags": [],
+        "unlabelled": []
+      },
+      "costUsd": 0.001450662
+    },
+    {
+      "name": "swallowed-payment-error",
+      "score": {
+        "mustRead": 1,
+        "inTop5": 1,
+        "inTop10": 1,
+        "ranks": [
+          1
+        ],
+        "expectedFlags": 1,
+        "truePositives": 1,
+        "falsePositives": [],
+        "missedFlags": [],
+        "unlabelled": []
+      },
+      "costUsd": 0.0019474000000000002
+    },
+    {
+      "name": "undescribed-rate-limit",
+      "score": {
+        "mustRead": 1,
+        "inTop5": 1,
+        "inTop10": 1,
+        "ranks": [
+          1
+        ],
+        "expectedFlags": 1,
+        "truePositives": 1,
+        "falsePositives": [],
+        "missedFlags": [],
+        "unlabelled": []
+      },
+      "costUsd": 0.0023853340000000002
+    }
+  ]
+}

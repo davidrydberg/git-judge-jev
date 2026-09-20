@@ -238,6 +238,7 @@ The `json` output is the full report for tuning: every verdict, the whole readin
 4. Only flagged hunks go to a generative model, GPT-5.6 Luna by default, one call per flag.
    Beside the hunk it reads the enclosing function as it is after the change, and the other hunks of the PR that change the same identifiers.
    A hunk alone cannot show whether a check removed here was moved somewhere else.
+   It also gets facts that code, not a model, found by searching the whole diff and the file: names added here and removed in another hunk, which is moved code, and whether a name removed here is still in the file.
    It confirms or rejects the flag, says whether it is worth stopping a reviewer for, and writes one sentence on what changed and one on what to verify.
    A rejected warning is dropped. One that holds but does not matter becomes a reason beside the hunk under "Then read".
    A gate is kept either way, the writer model cannot clear one.
@@ -304,6 +305,7 @@ It can never fail the check.
 - A generative model reads only flagged hunks. A subtle bug in a hunk that raised no flag gets no second look, at any setting.
 - A hunk scoring under `minAttention` is left out of the reading order and can raise a gate but no warning. Set `minAttention: 0` to rank every hunk and let every warning fire on it.
 - A large committed bundle is checked for the gates hunk by hunk, which can be most of a run's time and cost. List it under `exclude.unchecked` if you accept that it is sent nowhere.
+- A change the description leaves out is reported only where Jev is sure the hunk changes logic, touches a sensitive area, or is one users or data would notice. An undescribed edit to documentation or a rename is not.
 - The area and type labels are often wrong on small PRs, which is why they are off by default.
 - The function around a hunk is found by indentation, not by a parser. In a minified or oddly indented file the writer gets a window of lines instead.
 - A dismissal is a ticked box in a comment that anyone with write access can edit. It hides a warning, never a gate.

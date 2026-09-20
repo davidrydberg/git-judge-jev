@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vitest";
-import { enclosingBlock, relatedHunks } from "../src/context.js";
+import { enclosingBlock, moves, relatedHunks, stillPresent } from "../src/context.js";
 import type { Hunk } from "../src/diff.js";
 
 const FILE = [
@@ -60,5 +60,48 @@ describe("related hunks", () => {
   test("an identifier changed all over the PR ties nothing together", () => {
     const everywhere = Array.from({ length: 8 }, (_, index) => hunk(`r${index}`, "@@\n+logger.info(tenantId)"));
     expect(relatedHunks(hunk("z", "@@\n+logger.warn(tenantId)"), everywhere)).toEqual([]);
+  });
+});
+
+describe("facts from the whole diff", () => {
+  const hunk = (id: string, path: string, content: string, startLine = 1, endLine = 9) =>
+    ({ id, path, content, startLine, endLine, preClass: null }) as Hunk;
+  const callSite = hunk("policy#1", "src/policy.ts", "@@\n-  flags.push({ hunkId: hunk.id });\n+  flag(hunk, fields);");
+  const helper = hunk("policy#0", "src/policy.ts", "@@\n+  const findingId = createHash(hunk.path);");
+  const deleted = hunk("report#3", "src/report.ts", "@@\n-function findingId(flagId, hunk) {\n-  return createHash(hunk.path);\n-}", 303, 310);
+  const users = Array.from({ length: 8 }, (_, index) => hunk(`t#${index}`, `test/t${index}.ts`, "@@\n+  expect(flag.findingId).toBe(1);"));
+
+  test("a name added in the scope and removed in another hunk was moved here, however many hunks use it", () => {
+    const found = moves([callSite, helper], [callSite, helper, deleted, ...users]);
+    expect(found.facts).toEqual(["`createHash`, `findingId`, `hunk`, `path` are added here and removed in src/report.ts L303-310."]);
+    expect(found.hunks).toEqual([deleted]);
+  });
+
+  test("and the other way round, from where the code left", () => {
+    expect(moves([deleted], [callSite, helper, deleted]).facts).toEqual([
+      "`createHash`, `findingId`, `hunk`, `path` are removed here and added in src/policy.ts L1-9.",
+    ]);
+  });
+
+  test("one short name going the other way is no evidence of a move, one long name is", () => {
+    const adds = (word: string) => hunk("a", "src/a.ts", `@@\n+  ${word}();`);
+    const removes = (word: string) => hunk("b", "src/b.ts", `@@\n-  ${word}();`);
+    expect(moves([adds("path")], [adds("path"), removes("path")]).facts).toEqual([]);
+    expect(moves([adds("tenantFilter")], [adds("tenantFilter"), removes("tenantFilter")]).facts).toHaveLength(1);
+  });
+
+  test("a name edited in place within the scope is no move, nor is one that is only added", () => {
+    const renamed = hunk("a", "src/a.ts", "@@\n-  tenantFilter(id);\n+  tenantFilter(id, scope);");
+    expect(moves([renamed], [renamed, hunk("b", "src/b.ts", "@@\n+  tenantFilter(id);")]).facts).toEqual([]);
+    expect(moves([helper], [helper, ...users]).facts).toEqual([]);
+  });
+
+  test("a removed name is still in the file, or gone from it", () => {
+    const removal = hunk("s", "src/search.ts", "@@\n-  filters.push(tenantFilter(tenantId));\n+  filters.push(other);");
+    expect(stillPresent(removal, "const x = tenantId;\nfilters.push(other);")).toEqual([
+      "`tenantFilter` no longer appears anywhere in src/search.ts after the change.",
+      "`tenantId` still appears on 1 line of src/search.ts after the change.",
+    ]);
+    expect(stillPresent(removal, null)).toEqual([]);
   });
 });

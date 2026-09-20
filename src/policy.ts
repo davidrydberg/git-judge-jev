@@ -388,7 +388,9 @@ export function evaluate(
         thresholds.refactor_changes_behaviour,
       );
     }
-    if (mismatch) {
+    // Asked of one hunk, Jev finds something the description leaves out in most hunks of a large PR.
+    // It is worth a reader's time only where the change itself is: logic, a sensitive area, or users.
+    if (mismatch && worthDescribing(answers, policy)) {
       warn("unrelated_to_description", mismatch.unrelated_to_description.noul, thresholds.unrelated_to_description);
     }
     for (const question of policy.customQuestions) {
@@ -457,6 +459,17 @@ export function evaluate(
     labels: labels(hunks, reading, flags, policy),
     conclusion: gated.size > 0 ? "failure" : "success",
   };
+}
+
+/** A change a description should not leave out: Jev is sure it touches logic, a sensitive area, or what users or data see. */
+function worthDescribing(answers: HunkAnswers, policy: Policy): boolean {
+  const { code } = answers;
+  const confident = (answer: { confidence: number }) => answer.confidence >= policy.thresholds.choiceConfidence;
+  return (
+    LOGIC_SIGNALS.some((id) => code[id].noul >= SIGNAL_SHOWN) ||
+    (confident(code.sensitive_area) && code.sensitive_area.choice !== "none") ||
+    (confident(code.blast_radius) && ["end users", "money or data"].includes(code.blast_radius.choice))
+  );
 }
 
 function escalates(answers: HunkAnswers, policy: Policy): boolean {

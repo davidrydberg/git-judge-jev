@@ -342,7 +342,7 @@ describe("gates", () => {
   });
 
   test("warnings never fail the check", () => {
-    const findings = run({ h: { testLoosened: 1, safety: 1, commentDrift: 1, unrelated: 1 } });
+    const findings = run({ h: { testLoosened: 1, safety: 1, commentDrift: 1, unrelated: 1, condition: 0.9 } });
     expect(findings.flags).toHaveLength(4);
     expect(findings.conclusion).toBe("success");
   });
@@ -354,7 +354,10 @@ describe("warnings", () => {
     ["test loosened below", { testLoosened: 0.39 }, []],
     ["safety check weakened", { safety: 0.7 }, ["h:safety_check_weakened"]],
     ["comment drift", { commentDrift: 0.7 }, ["h:comment_drift"]],
-    ["unrelated to description", { unrelated: 0.7 }, ["h:unrelated_to_description"]],
+    ["unrelated to description, in a hunk that changes logic", { unrelated: 0.7, condition: 0.7 }, ["h:unrelated_to_description"]],
+    ["unrelated to description, in a sensitive area", { unrelated: 0.7, area: "auth" }, ["h:unrelated_to_description"]],
+    ["unrelated to description, where users would notice", { unrelated: 0.7, blast: "end users" }, ["h:unrelated_to_description"]],
+    ["unrelated to description, in a hunk where nothing is at stake", { unrelated: 0.95, condition: 0.69 }, []],
     ["behaviour change in a feature is expected", { behaviour: 0.95, type: "feature" }, []],
     ["behaviour change in a refactor", { behaviour: 0.95, type: "refactor" }, ["h:refactor_changes_behaviour"]],
     ["refactor below the behaviour threshold", { behaviour: 0.39, type: "refactor" }, []],
@@ -367,7 +370,7 @@ describe("warnings", () => {
 describe("prose", () => {
   test("questions about code raise nothing on documentation, gates and the description flag still do", () => {
     const readme = hunk("readme", { path: "docs/README.md" });
-    const spec = { safety: 0.9, testLoosened: 0.9, commentDrift: 0.9, type: "refactor", behaviour: 0.9, unrelated: 0.9, secret: 0.95 };
+    const spec = { safety: 0.9, testLoosened: 0.9, commentDrift: 0.9, type: "refactor", behaviour: 0.9, unrelated: 0.9, secret: 0.95, blast: "end users" };
     const judgement = {
       hunks: { readme: answers(spec) },
       gateOnly: {},

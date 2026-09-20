@@ -12,7 +12,7 @@ Read it before changing behaviour, and change it in the same commit when a decis
 | `src/questions.ts` | Every question asked of Jev. The one file a non-engineer is expected to edit |
 | `src/judge.ts` | Sends hunks to TypeSafe. Owns the state cap, truncation, concurrency, per-hunk failure tolerance, the fake-client seam. Generated and vendored hunks get the gate questions only |
 | `src/policy.ts` | Policy file schema, and the pure function from answers to findings |
-| `src/context.ts` | Pure. The enclosing block of a hunk by indentation, and the other hunks that change the same identifiers. What the writer reads beside a flagged hunk |
+| `src/context.ts` | Pure. The enclosing block of a hunk by indentation, the other hunks that change the same identifiers, and facts from the whole diff: moved names, and whether a removed name is still in the file. What the writer reads beside a flagged hunk |
 | `src/writer.ts` | Generator interface, one verdict per flag with a materiality call, the TL;DR. Drops rejected warnings, never a gate. A writer outage leaves gates standing |
 | `src/generators.ts` | OpenAI and Anthropic adapters behind the generator interface. No unit tests |
 | `src/report.ts` | Pure rendering: the one summary comment, a part for people in prose and a collapsed block for coding agents in JSON, and the check. Reads the previous comment back for new/standing marks and dismissals. Snapshot-tested |

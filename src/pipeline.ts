@@ -1,4 +1,4 @@
-import { enclosingBlock, relatedHunks, type HunkContext } from "./context.js";
+import { enclosingBlock, moves, relatedHunks, stillPresent, type HunkContext } from "./context.js";
 import { parseDiff, type Hunk } from "./diff.js";
 import { judge, type JudgeClient } from "./judge.js";
 import { evaluate, hasUsableDescription, selectForJudging, type Policy } from "./policy.js";
@@ -83,6 +83,9 @@ export async function runPipeline(input: PipelineInput): Promise<Report> {
 
 type Flags = ReturnType<typeof evaluate>["flags"];
 
+// A hunk the code moved to or from comes first, then the ones that share changed identifiers.
+const MAX_RELATED_HUNKS = 4;
+
 /** Context for each flagged hunk the writer will read. One file read per file, whatever the number of flags in it. */
 async function contextsFor(
   flags: Flags,
@@ -114,8 +117,18 @@ async function contextsFor(
         );
         if (overlaps) enclosing = null;
       }
-      const related = relatedHunks(hunk, hunks).filter((other) => !secret.has(other.id));
-      contexts.set(hunk.id, { enclosing, related });
+      // The writer reasons about the whole enclosing block, so a move is looked for from every hunk inside it.
+      const last = enclosing ? enclosing.startLine + enclosing.text.split("\n").length - 1 : 0;
+      const scope = hunks.filter(
+        (other) =>
+          other.id === hunk.id ||
+          (enclosing !== null && other.path === hunk.path && other.startLine <= last && Math.max(other.endLine, other.startLine) >= enclosing.startLine),
+      );
+      const moved = moves(scope, hunks.filter((other) => !secret.has(other.id)));
+      const related = [...new Set([...moved.hunks, ...relatedHunks(hunk, hunks)])]
+        .filter((other) => !secret.has(other.id) && !scope.includes(other))
+        .slice(0, MAX_RELATED_HUNKS);
+      contexts.set(hunk.id, { enclosing, related, facts: [...moved.facts, ...stillPresent(hunk, content)] });
     }),
   );
   return contexts;

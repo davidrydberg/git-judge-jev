@@ -1,11 +1,12 @@
 // Runs the real pipeline over every case in eval/cases and scores it against the case's labels.
-// Usage: npm run eval -- [--label name] [--policy path/to/policy.yml] [--case name]
+// Usage: npm run eval -- [--label name] [--policy path/to/policy.yml] [--case name] [--cases eval/corpus]
 // Every model answer is cached in eval/.cache by request, so a rerun after a policy change is free
 // and a rerun after a question change pays only for what the change touched. Nothing is posted.
 
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { z } from "zod";
 import { parseDiff } from "../src/diff.js";
 import { createGenerator } from "../src/generators.js";
 import { createJudgeClient, type JudgeClient } from "../src/judge.js";
@@ -22,7 +23,7 @@ const option = (name: string) => {
 const typesafeKey = process.env.TYPESAFE_API_KEY;
 if (!typesafeKey) throw new Error("TYPESAFE_API_KEY is empty in .env");
 
-const CASES = "eval/cases";
+const CASES = option("cases") ?? "eval/cases";
 const CACHE = "eval/.cache";
 mkdirSync(CACHE, { recursive: true });
 let cacheHits = 0;
@@ -53,7 +54,10 @@ const realGenerator = createGenerator(policy.generator.model, {
 const generator: Generator = {
   model: realGenerator.model,
   generate: ({ schema, ...request }) =>
-    cached({ model: realGenerator.model, ...request }, () => realGenerator.generate({ schema, ...request })),
+    // The schema is part of the request: a changed field description changes the answer.
+    cached({ model: realGenerator.model, ...request, schema: z.toJSONSchema(schema) }, () =>
+      realGenerator.generate({ schema, ...request }),
+    ),
 };
 
 const only = option("case");
@@ -70,6 +74,11 @@ for (const name of names) {
     judgeClient,
     generator,
     now: Date.now,
+    // A case may hold the files as they were after the change, under head/. Then the writer gets its context.
+    fetchFile: async (path) => {
+      const file = join(CASES, name, "head", path);
+      return existsSync(file) ? readFileSync(file, "utf8") : null;
+    },
   });
   const score = scoreCase(spec, parseDiff(diff, policy.exclude).hunks, report.json);
   results.push({ name, score, costUsd: report.json.costUsd });
@@ -90,6 +99,11 @@ for (const { name, score } of results) {
       score.falsePositives.join(" ") || "-",
     ].join(" | "),
   );
+}
+const unlabelled = results.filter(({ score }) => score.unlabelled.length > 0);
+if (unlabelled.length > 0) {
+  console.log("\nVerdicts with no label. Add the true ones to the case as `flags`, and `flags: []` when none is:");
+  for (const { name, score } of unlabelled) for (const verdict of score.unlabelled) console.log(`  ${name}: ${verdict}`);
 }
 const all = totals(results.map((result) => result.score));
 const cost = results.reduce((sum, result) => sum + (result.costUsd ?? 0), 0);

@@ -5,7 +5,7 @@ import { createGitHub, type GitHub } from "./github.js";
 import { createJudgeClient } from "./judge.js";
 import { runPipeline } from "./pipeline.js";
 import { parsePolicy } from "./policy.js";
-import { buildDidNotRunReport } from "./report.js";
+import { buildDidNotRunReport, readPrevious } from "./report.js";
 
 async function main(): Promise<void> {
   const pull = context.payload.pull_request;
@@ -19,6 +19,15 @@ async function main(): Promise<void> {
     return;
   }
 
+  // Dependabot runs in the same repo but is given no secrets and a read-only token. Without this it
+  // would fail on the missing key, then fail again trying to say so in a comment. Only Dependabot:
+  // a key missing from any other run is a broken setup, and must not read as a pass.
+  if (context.actor === "dependabot[bot]" && !core.getInput("typesafe-api-key")) {
+    core.notice("git-judge-jev did not judge this pull request. Dependabot pull requests get no secrets.");
+    core.setOutput("conclusion", "did_not_run");
+    return;
+  }
+
   const github = createGitHub(core.getInput("github-token", { required: true }), {
     owner: context.repo.owner,
     repo: context.repo.repo,
@@ -29,6 +38,10 @@ async function main(): Promise<void> {
 
   // A broken policy file is the maintainer's bug, not an outage. It fails loudly instead of passing quietly.
   const policy = parsePolicy(await github.fetchPolicy());
+
+  // Memory is a nicety. A comment that cannot be read costs the "new" marks, not the run.
+  const previousSummary = await github.fetchPreviousSummary().catch(() => null);
+  const previous = previousSummary ? readPrevious(previousSummary) : null;
 
   let report;
   try {
@@ -48,11 +61,13 @@ async function main(): Promise<void> {
       now: Date.now,
       prUrl: pull.html_url,
       headSha: pull.head.sha,
+      fetchFile: (path) => github.fetchFile(path),
+      previous,
     });
   } catch (error) {
     const reason = error instanceof Error ? error.message : String(error);
     if (await skipIfStale(github)) return;
-    const didNotRun = buildDidNotRunReport(reason, policy.failOnError);
+    const didNotRun = buildDidNotRunReport(reason, policy.failOnError, previous?.dismissed);
     await github.upsertSummary(didNotRun.summary);
     core.setOutput("conclusion", "did_not_run");
     if (didNotRun.check.conclusion === "failure") core.setFailed(`git-judge-jev did not run: ${reason}`);
@@ -62,9 +77,13 @@ async function main(): Promise<void> {
 
   if (await skipIfStale(github)) return;
   await github.upsertSummary(report.summary);
-  await github.syncLabels(report.labels);
+  if (policy.labels || report.labels.length > 0) await github.syncLabels(report.labels, policy.labels);
+  // Every tick is a labelled false positive. This line is the per-repo precision record for tuning thresholds.
+  const shown = report.json.verdicts.filter((verdict) => verdict.kind === "warning" && verdict.material).length;
+  core.info(`feedback: ${report.json.dismissed.length} dismissed by a reviewer, ${shown} shown`);
   core.setOutput("conclusion", report.check.conclusion);
   core.setOutput("json", JSON.stringify(report.json));
+  core.setOutput("handoff", JSON.stringify(report.handoff));
   if (report.check.conclusion === "failure") core.setFailed(report.check.title);
   else core.info(report.check.title);
 }

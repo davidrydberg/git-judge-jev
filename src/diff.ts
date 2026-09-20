@@ -1,6 +1,7 @@
 import picomatch from "picomatch";
 
-export type PreClass = "lockfile" | "generated" | "vendored";
+/** "unchecked" is a path the maintainer named in the policy as never to be sent anywhere. The policy is read from the base, so a PR cannot add one. */
+export type PreClass = "lockfile" | "generated" | "vendored" | "unchecked";
 
 export type FileStatus = "added" | "deleted" | "renamed" | "modified";
 
@@ -44,6 +45,7 @@ export interface DiffOptions {
   /** Extra globs from the policy file, on top of the built-in path rules. */
   generated?: string[];
   vendored?: string[];
+  unchecked?: string[];
 }
 
 const LOCKFILES = new Set([
@@ -317,9 +319,11 @@ function languageOf(path: string): string | null {
 function pathClassifier(options: DiffOptions): (path: string) => PreClass | null {
   const extraGenerated = picomatch(options.generated ?? [], { dot: true });
   const extraVendored = picomatch(options.vendored ?? [], { dot: true });
+  const unchecked = picomatch(options.unchecked ?? [], { dot: true });
   return (path) => {
     const basename = path.slice(path.lastIndexOf("/") + 1);
     if (LOCKFILES.has(basename)) return "lockfile";
+    if (unchecked(path)) return "unchecked";
     if (VENDORED.test(path) || extraVendored(path)) return "vendored";
     if (GENERATED.some((pattern) => pattern.test(path)) || extraGenerated(path)) return "generated";
     return null;

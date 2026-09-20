@@ -1,6 +1,9 @@
 name: git-judge-jev
 description: One PR comment that says what the PR really does, which hunks need a human, why, and what to verify. Runs on TypeSafe Jev.
 author: David Rydberg
+branding:
+  icon: eye
+  color: gray-dark
 
 inputs:
   typesafe-api-key:
@@ -21,7 +24,9 @@ outputs:
   conclusion:
     description: success, failure, or did_not_run.
   json:
-    description: The full findings and verdicts as JSON, the same data as the hidden block in the summary comment.
+    description: The full report as JSON. Every verdict, the whole reading order, every raw Jev answer.
+  handoff:
+    description: What the comment tells a coding agent, as JSON. Each finding with what to do about it and when it counts as resolved.
 
 runs:
   using: node24

@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { parse as parseYaml } from "yaml";
 import { z } from "zod";
 import { isProse, type Hunk } from "./diff.js";
@@ -70,6 +71,12 @@ const policySchema = z.strictObject({
   /** Below this many characters the description is treated as missing. */
   minDescriptionLength: z.number().int().min(0).default(30),
   maxHunks: z.number().int().min(1).default(200),
+  /** With no finding and fewer judged hunks than this, the comment leaves the reading order out. A small clean PR needs no guide. */
+  readingOrderFrom: z.number().int().min(0).default(10),
+  /** Apply area, size, and type labels. Off by default: they are often wrong on small PRs. */
+  labels: z.boolean().default(false),
+  /** Show the table of every raw Jev answer in the comment, and embed the answers in its JSON block. For tuning thresholds. */
+  debug: z.boolean().default(false),
   /** Upper bound of changed lines per size label. Anything larger is XL. */
   sizeLabels: z
     .strictObject({
@@ -82,6 +89,12 @@ const policySchema = z.strictObject({
     .strictObject({
       generated: z.array(z.string()).default([]),
       vendored: z.array(z.string()).default([]),
+      /**
+       * Generated and vendored files are still asked the gate questions, since their path is the PR author's.
+       * A path listed here is the maintainer's word, and is sent nowhere. For a large committed bundle,
+       * where the gate check costs more time than the rest of the run.
+       */
+      unchecked: z.array(z.string()).default([]),
     })
     .prefault({}),
   judge: z.strictObject({ model: z.string().default("jev-latest") }).prefault({}),
@@ -132,6 +145,12 @@ export type WarningId =
   | "unrelated_to_description";
 
 export interface Flag {
+  /**
+   * The flag, the file, and the hunk's changed lines, hashed. The hunk id is a position in the diff and
+   * moves when a push adds a hunk above it, this does not. It covers the whole hunk, not only the lines
+   * the flag is about: an edit within three lines merges into the hunk and reads as a new finding.
+   */
+  findingId: string;
   hunkId: string;
   /** A gate id, a warning id, or "custom:<id>" for a question from the policy file. */
   id: GateId | WarningId | `custom:${string}`;
@@ -169,7 +188,19 @@ export interface Findings {
     area: string | null;
     blastRadius: string | null;
   }[];
-  skipped: { mechanical: number; lockfile: number; generated: number; vendored: number; overCap: number };
+  skipped: {
+    mechanical: number;
+    lockfile: number;
+    generated: number;
+    vendored: number;
+    /** Hunks in paths the policy lists under `exclude.unchecked`. Sent nowhere. */
+    unchecked: number;
+    overCap: number;
+    /** Hunks TypeSafe gave no answer for after retries. */
+    failed: number;
+    /** Generated or vendored hunks too large to check for gates in full. */
+    gateOnlyCut: number;
+  };
   lowCoverage: string[];
   labels: string[];
   conclusion: "success" | "failure";
@@ -179,10 +210,19 @@ export function hasUsableDescription(description: string, policy: Policy): boole
   return description.trim().length >= policy.minDescriptionLength;
 }
 
-/** Splits hunks into those sent to the judge and those left out by the hunk cap, in diff order. */
-export function selectForJudging(hunks: Hunk[], policy: Policy): { judged: Hunk[]; overCap: Hunk[] } {
+/**
+ * Splits hunks into those judged in full, those asked the gate questions only, and those left out by
+ * the hunk cap, each in diff order. Generated and vendored hunks take what the cap has left.
+ */
+export function selectForJudging(
+  hunks: Hunk[],
+  policy: Policy,
+): { judged: Hunk[]; gateOnly: Hunk[]; overCap: Hunk[] } {
   const candidates = hunks.filter((hunk) => hunk.preClass === null);
-  return { judged: candidates.slice(0, policy.maxHunks), overCap: candidates.slice(policy.maxHunks) };
+  const setAside = hunks.filter((hunk) => hunk.preClass === "generated" || hunk.preClass === "vendored");
+  const judged = candidates.slice(0, policy.maxHunks);
+  const gateOnly = setAside.slice(0, policy.maxHunks - judged.length);
+  return { judged, gateOnly, overCap: [...candidates.slice(judged.length), ...setAside.slice(gateOnly.length)] };
 }
 
 /** A hunk counts as a refactor only when Jev picks that type with enough confidence. */
@@ -273,6 +313,15 @@ export function evaluate(
   const sure = (answer: { choice: string; confidence: number }) => (confident(answer) ? answer.choice : null);
 
   const flags: Flag[] = [];
+  const ids = new Map<string, number>();
+  const flag = (hunk: Hunk, fields: Omit<Flag, "findingId" | "hunkId">) => {
+    const changed = hunk.content.split("\n").filter((line) => /^[+-]/.test(line));
+    const id = createHash("sha256").update([fields.id, hunk.path, ...changed].join("\n")).digest("hex").slice(0, 12);
+    const count = (ids.get(id) ?? 0) + 1;
+    ids.set(id, count);
+    // The same edit twice in one file hashes the same, so the later one is numbered.
+    flags.push({ findingId: count === 1 ? id : `${id}-${count}`, hunkId: hunk.id, ...fields });
+  };
   const gated = new Set<string>();
   const nearMisses = new Map<string, NearMiss[]>();
   const nearMiss = (hunkId: string, id: Flag["id"], probability: number, threshold: number) => {
@@ -285,11 +334,23 @@ export function evaluate(
     for (const id of GATES) {
       const probability = answers.code[id].noul;
       if (probability >= policy.thresholds.gates[id]) {
-        flags.push({ hunkId: hunk.id, id, kind: "gate", probability, escalate: escalates(answers, policy) });
+        flag(hunk, { id, kind: "gate", probability, escalate: escalates(answers, policy) });
         gated.add(hunk.id);
       } else {
         nearMiss(hunk.id, id, probability, policy.thresholds.gates[id]);
       }
+    }
+  }
+
+  // A path is written by the PR author. It spares a generated or vendored hunk the ranking, never the gates.
+  for (const hunk of hunks) {
+    const gateOnly = judgement.gateOnly[hunk.id];
+    if (!gateOnly) continue;
+    for (const id of GATES) {
+      const probability = gateOnly.answers[id].noul;
+      if (probability < policy.thresholds.gates[id]) continue;
+      flag(hunk, { id, kind: "gate", probability, escalate: false });
+      gated.add(hunk.id);
     }
   }
 
@@ -303,7 +364,7 @@ export function evaluate(
   for (const { hunk, answers } of reading) {
     const warn = (id: Flag["id"], probability: number, threshold: number) => {
       if (probability >= threshold) {
-        flags.push({ hunkId: hunk.id, id, kind: "warning", probability, escalate: escalates(answers, policy) });
+        flag(hunk, { id, kind: "warning", probability, escalate: escalates(answers, policy) });
         // The description flag is a statement about the PR, so a near miss on it says nothing about this hunk.
       } else if (id !== "unrelated_to_description") {
         nearMiss(hunk.id, id, probability, threshold);
@@ -327,7 +388,9 @@ export function evaluate(
         thresholds.refactor_changes_behaviour,
       );
     }
-    if (mismatch) {
+    // Asked of one hunk, Jev finds something the description leaves out in most hunks of a large PR.
+    // It is worth a reader's time only where the change itself is: logic, a sensitive area, or users.
+    if (mismatch && worthDescribing(answers, policy)) {
       warn("unrelated_to_description", mismatch.unrelated_to_description.noul, thresholds.unrelated_to_description);
     }
     for (const question of policy.customQuestions) {
@@ -356,7 +419,15 @@ export function evaluate(
   if (changeTypes.size >= 3) prWarnings.push({ id: "split_suggested", changeTypes: [...changeTypes].sort() });
 
   const count = (preClass: Hunk["preClass"]) => hunks.filter((hunk) => hunk.preClass === preClass).length;
-  const unjudged = hunks.filter((hunk) => hunk.preClass === null && !judgement.hunks[hunk.id]);
+  const failed = new Set(judgement.failed);
+  const unjudged = hunks.filter(
+    (hunk) =>
+      hunk.preClass !== "lockfile" &&
+      hunk.preClass !== "unchecked" &&
+      !judgement.hunks[hunk.id] &&
+      !judgement.gateOnly[hunk.id] &&
+      !failed.has(hunk.id),
+  );
 
   return {
     flags,
@@ -379,12 +450,26 @@ export function evaluate(
       lockfile: count("lockfile"),
       generated: count("generated"),
       vendored: count("vendored"),
+      unchecked: count("unchecked"),
       overCap: unjudged.length,
+      failed: failed.size,
+      gateOnlyCut: Object.values(judgement.gateOnly).filter((answers) => answers.lowCoverage).length,
     },
     lowCoverage: judged.filter((entry) => entry.answers.lowCoverage).map((entry) => entry.hunk.id),
     labels: labels(hunks, reading, flags, policy),
     conclusion: gated.size > 0 ? "failure" : "success",
   };
+}
+
+/** A change a description should not leave out: Jev is sure it touches logic, a sensitive area, or what users or data see. */
+function worthDescribing(answers: HunkAnswers, policy: Policy): boolean {
+  const { code } = answers;
+  const confident = (answer: { confidence: number }) => answer.confidence >= policy.thresholds.choiceConfidence;
+  return (
+    LOGIC_SIGNALS.some((id) => code[id].noul >= SIGNAL_SHOWN) ||
+    (confident(code.sensitive_area) && code.sensitive_area.choice !== "none") ||
+    (confident(code.blast_radius) && ["end users", "money or data"].includes(code.blast_radius.choice))
+  );
 }
 
 function escalates(answers: HunkAnswers, policy: Policy): boolean {
@@ -403,6 +488,12 @@ function labels(
   policy: Policy,
 ): string[] {
   const result = new Set<string>();
+  // A label a maintainer asked for by name is always applied. The guessed ones are opt-in.
+  for (const question of policy.customQuestions) {
+    if (question.label && flags.some((flag) => flag.id === `custom:${question.id}`)) result.add(question.label);
+  }
+  if (!policy.labels) return [...result].sort();
+
   const sizeByType = new Map<string, number>();
   for (const { hunk, answers } of reading) {
     const { sensitive_area: area, change_type: type } = answers.code;
@@ -419,9 +510,5 @@ function labels(
     .reduce((sum, hunk) => sum + hunk.size, 0);
   const { S, M, L } = policy.sizeLabels;
   result.add(`size: ${changed <= S ? "S" : changed <= M ? "M" : changed <= L ? "L" : "XL"}`);
-
-  for (const question of policy.customQuestions) {
-    if (question.label && flags.some((flag) => flag.id === `custom:${question.id}`)) result.add(question.label);
-  }
   return [...result].sort();
 }

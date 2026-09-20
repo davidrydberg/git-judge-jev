@@ -140,3 +140,12 @@ export const PR_QUESTIONS = {
 export const GATES = ["secret_semantic", "destructive_data"] as const;
 
 export type GateId = (typeof GATES)[number];
+
+/**
+ * Asked of hunks set aside by path as generated or vendored. The path is written by the PR author,
+ * so it may spare a hunk the ranking but never the gates.
+ */
+export const GATE_QUESTIONS = {
+  secret_semantic: CODE_QUESTIONS.secret_semantic,
+  destructive_data: CODE_QUESTIONS.destructive_data,
+} as const satisfies Questions;

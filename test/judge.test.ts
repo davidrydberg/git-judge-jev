@@ -185,11 +185,47 @@ describe("running", () => {
     expect(result).toMatchObject({ model: "jev-1.13.0", requests: 5, inputTokens: 500 });
   });
 
-  test("a failed request fails the whole judgement instead of returning partial answers", async () => {
+  test("one hunk TypeSafe will not answer for is reported as failed, the rest is judged", async () => {
     const { client } = fakeClient({ failOn: (request) => stateOf(request).file === "src/broken.ts" });
-    const hunks = [hunk("a"), hunk("b", { path: "src/broken.ts" })];
+    const hunks = [hunk("a"), hunk("b", { path: "src/broken.ts" }), hunk("c")];
+
+    const result = await judge(client, hunks, pr);
+    expect(Object.keys(result.hunks)).toEqual(["a", "c"]);
+    expect(result.failed).toEqual(["b"]);
+  });
+
+  test("an outage is not retried hunk by hunk: past a handful of failures the judgement fails", async () => {
+    const { client, requests } = fakeClient({ failOn: (request) => "diff" in stateOf(request) });
+    const hunks = Array.from({ length: 100 }, (_, index) => hunk(`h${index}`));
 
     await expect(judge(client, hunks, pr)).rejects.toThrow("TypeSafe unreachable");
+    expect(requests.length).toBeLessThan(40);
+  });
+
+  test("every hunk failing fails the judgement, however few they are", async () => {
+    const { client } = fakeClient({ failOn: (request) => "diff" in stateOf(request) });
+    await expect(judge(client, [hunk("a"), hunk("b")], pr)).rejects.toThrow("TypeSafe unreachable");
+  });
+
+  test("a generated or vendored hunk is asked the gate questions and nothing else, a lockfile or an unchecked path nothing", async () => {
+    const { client, requests } = fakeClient();
+    const hunks = [
+      hunk("bundle", { path: "dist/index.js", preClass: "generated" }),
+      hunk("lib", { path: "vendor/lib.go", preClass: "vendored" }),
+      hunk("lock", { path: "package-lock.json", preClass: "lockfile" }),
+      hunk("unchecked", { path: "dist/big.js", preClass: "unchecked" }),
+    ];
+
+    const result = await judge(client, hunks, pr);
+    expect(Object.keys(result.gateOnly)).toEqual(["bundle", "lib"]);
+    expect(result.hunks).toEqual({});
+    const perHunk = requests.filter((request) => "diff" in stateOf(request));
+    expect(perHunk.map((request) => Object.keys(request.questions))).toEqual([
+      ["secret_semantic", "destructive_data"],
+      ["secret_semantic", "destructive_data"],
+    ]);
+    // No description in the state: the gates never see it, on any path.
+    expect(perHunk.every((request) => !("pr_description" in stateOf(request)))).toBe(true);
   });
 
   test("a missing answer is an error, not a silent gap", async () => {

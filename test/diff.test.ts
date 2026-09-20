@@ -111,6 +111,12 @@ describe("mixed PR", () => {
     expect(hunkOf(withGlobs, "schema.sql").preClass).toBe("generated");
     expect(hunkOf(withGlobs, "docs/my notes/plan.md").preClass).toBe("vendored");
   });
+
+  test("a path the policy lists as unchecked wins over the built-in guess, a lockfile stays a lockfile", () => {
+    const parsed = parseDiff(fixture("mixed"), { unchecked: ["vendor/**", "**/*.lock"] });
+    expect(hunkOf(parsed, "vendor/lib/index.js").preClass).toBe("unchecked");
+    expect(parseDiff(fixture("lockfile-bump"), { unchecked: ["**"] }).hunks.every((hunk) => hunk.preClass === "lockfile")).toBe(true);
+  });
 });
 
 describe("test snapshots", () => {

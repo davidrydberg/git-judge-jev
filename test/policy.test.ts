@@ -90,11 +90,31 @@ function hunk(id: string, overrides: Partial<Hunk> = {}): Hunk {
 
 function run(
   specs: Record<string, Spec>,
-  options: { policy?: string; description?: string; extraHunks?: Hunk[]; pr?: { quality?: number; tests?: number } } = {},
+  options: {
+    policy?: string;
+    description?: string;
+    extraHunks?: Hunk[];
+    pr?: { quality?: number; tests?: number };
+    gateOnly?: Record<string, { secret?: number; destructive?: number; lowCoverage?: boolean }>;
+    failed?: string[];
+  } = {},
 ): Findings {
   const hunks = [...Object.keys(specs).map((id) => hunk(id)), ...(options.extraHunks ?? [])];
   const judgement = {
     hunks: Object.fromEntries(Object.entries(specs).map(([id, spec]) => [id, answers(spec)])),
+    gateOnly: Object.fromEntries(
+      Object.entries(options.gateOnly ?? {}).map(([id, spec]) => [
+        id,
+        {
+          answers: {
+            secret_semantic: { type: "noul", noul: spec.secret ?? 0 },
+            destructive_data: { type: "noul", noul: spec.destructive ?? 0 },
+          },
+          lowCoverage: spec.lowCoverage ?? false,
+        },
+      ]),
+    ),
+    failed: options.failed ?? [],
     pr: {
       description_quality: { type: "score", score: options.pr?.quality ?? 2 },
       tests_cover_change: { type: "noul", noul: options.pr?.tests ?? 0.9 },
@@ -218,6 +238,8 @@ describe("reading order", () => {
     expect(run({ a: { condition: 0.69 } }).readingOrder[0]!.signals).toEqual([]);
     const judgement = {
       hunks: { readme: answers({ condition: 0.9 }) },
+      gateOnly: {},
+      failed: [],
       pr: { description_quality: { score: 2 }, tests_cover_change: { noul: 1 } },
     } as unknown as Judgement;
     const prose = evaluate([hunk("readme", { path: "README.md" })], judgement, DESCRIPTION, parsePolicy(""));
@@ -248,12 +270,42 @@ describe("reading order", () => {
         extraHunks: [
           hunk("lock", { preClass: "lockfile" }),
           hunk("vendored", { preClass: "vendored" }),
+          hunk("generated", { preClass: "generated" }),
+          hunk("bundle", { preClass: "unchecked" }),
           hunk("not-judged"),
+          hunk("no-answer"),
         ],
+        gateOnly: { vendored: { lowCoverage: true } },
+        failed: ["no-answer"],
       },
     );
-    expect(findings.skipped).toEqual({ mechanical: 0, lockfile: 1, generated: 0, vendored: 1, overCap: 1 });
+    // The generated hunk got no gate answers and did not fail, so the cap left it out.
+    expect(findings.skipped).toEqual({
+      mechanical: 0,
+      lockfile: 1,
+      generated: 1,
+      vendored: 1,
+      unchecked: 1,
+      overCap: 2,
+      failed: 1,
+      gateOnlyCut: 1,
+    });
     expect(findings.lowCoverage).toEqual(["judged"]);
+  });
+
+  test("the hunk cap is spent on ranked hunks first, generated and vendored ones take what is left", () => {
+    const hunks = [
+      hunk("vendored", { preClass: "vendored" }),
+      hunk("a"),
+      hunk("lock", { preClass: "lockfile" }),
+      hunk("generated", { preClass: "generated" }),
+      hunk("b"),
+    ];
+    const ids = (selected: Hunk[]) => selected.map((entry) => entry.id);
+    const roomy = selectForJudging(hunks, parsePolicy("maxHunks: 3"));
+    expect([ids(roomy.judged), ids(roomy.gateOnly), ids(roomy.overCap)]).toEqual([["a", "b"], ["vendored"], ["generated"]]);
+    const tight = selectForJudging(hunks, parsePolicy("maxHunks: 1"));
+    expect([ids(tight.judged), ids(tight.gateOnly), ids(tight.overCap)]).toEqual([["a"], [], ["b", "vendored", "generated"]]);
   });
 });
 
@@ -267,6 +319,20 @@ describe("gates", () => {
     const findings = run({ h: spec });
     expect(flagIds(findings)).toEqual(expected);
     expect(findings.conclusion).toBe(conclusion);
+  });
+
+  test("a path does not spare a hunk the gates: a secret in a vendored file fails the check", () => {
+    const findings = run(
+      { h: {} },
+      {
+        extraHunks: [hunk("bundle", { preClass: "generated" }), hunk("lib", { preClass: "vendored" })],
+        gateOnly: { bundle: { secret: 0.89 }, lib: { secret: 0.95, destructive: 0.2 } },
+      },
+    );
+    expect(flagIds(findings)).toEqual(["lib:secret_semantic"]);
+    expect(findings.conclusion).toBe("failure");
+    // It is blocked, not ranked: the reading order holds only hunks judged in full.
+    expect(findings.readingOrder.map((entry) => entry.hunkId)).toEqual(["h"]);
   });
 
   test("a gate fires on a hunk that looks mechanical, and that hunk is read first", () => {
@@ -304,6 +370,8 @@ describe("prose", () => {
     const spec = { safety: 0.9, testLoosened: 0.9, commentDrift: 0.9, type: "refactor", behaviour: 0.9, unrelated: 0.9, secret: 0.95 };
     const judgement = {
       hunks: { readme: answers(spec) },
+      gateOnly: {},
+      failed: [],
       pr: { description_quality: { score: 2 }, tests_cover_change: { noul: 1 } },
     } as unknown as Judgement;
     const findings = evaluate([readme], judgement, DESCRIPTION, parsePolicy(""));
@@ -318,6 +386,8 @@ describe("test files", () => {
     const spec = { testLoosened: 0.9, safety: 0.9 };
     const judgement = {
       hunks: { spec: answers(spec), code: answers(spec) },
+      gateOnly: {},
+      failed: [],
       pr: { description_quality: { score: 2 }, tests_cover_change: { noul: 1 } },
     } as unknown as Judgement;
     const findings = evaluate(hunks, judgement, DESCRIPTION, parsePolicy(""));
@@ -366,13 +436,15 @@ describe("split suggestion", () => {
 
 describe("labels", () => {
   test("areas found, the dominant change type by changed lines, and a size", () => {
-    const findings = run({
+    const specs = {
       a: { area: "auth", type: "feature" },
       b: { area: "payments", type: "refactor" },
       c: { type: "refactor" },
       skipped: { area: "public_api", mechanical: 1 },
-    });
-    expect(findings.labels).toEqual(["area: auth", "area: payments", "size: S", "type: refactor"]);
+    };
+    expect(run(specs, { policy: "labels: true" }).labels).toEqual(["area: auth", "area: payments", "size: S", "type: refactor"]);
+    // Guessed labels are opt-in. They are often wrong on small PRs.
+    expect(run(specs).labels).toEqual([]);
   });
 
   test.each([
@@ -382,12 +454,12 @@ describe("labels", () => {
     [1000, "size: L"],
     [1001, "size: XL"],
   ])("%i changed lines is %s", (size, label) => {
-    const judgement = { hunks: {}, pr: { description_quality: { score: 2 }, tests_cover_change: { noul: 1 } } };
+    const judgement = { hunks: {}, gateOnly: {}, failed: [], pr: { description_quality: { score: 2 }, tests_cover_change: { noul: 1 } } };
     const findings = evaluate(
       [hunk("h", { size }), hunk("lock", { size: 9999, preClass: "lockfile" })],
       judgement as unknown as Judgement,
       DESCRIPTION,
-      parsePolicy(""),
+      parsePolicy("labels: true"),
     );
     expect(findings.labels).toEqual([label]);
   });
@@ -423,7 +495,7 @@ describe("custom questions", () => {
   test("raise a warning and a label", () => {
     const findings = run({ h: { custom: { invoicing: 0.8 } } }, { policy });
     expect(findings.flags).toEqual([
-      { hunkId: "h", id: "custom:invoicing", kind: "warning", probability: 0.8, escalate: false },
+      { findingId: expect.any(String), hunkId: "h", id: "custom:invoicing", kind: "warning", probability: 0.8, escalate: false },
     ]);
     expect(findings.labels).toContain("touches-invoicing");
   });
@@ -447,5 +519,37 @@ describe("hunk cap", () => {
     const { judged, overCap } = selectForJudging(hunks, parsePolicy("maxHunks: 2"));
     expect(judged.map((entry) => entry.id)).toEqual(["a", "b"]);
     expect(overCap.map((entry) => entry.id)).toEqual(["c"]);
+  });
+});
+
+describe("finding ids", () => {
+  const edit = "@@ -2,3 +2,3 @@\n context\n-expect(total).toBe(100);\n+expect(total).toBeDefined();\n context";
+  const judgementFor = (ids: string[], spec: Spec) =>
+    ({
+      hunks: Object.fromEntries(ids.map((id) => [id, answers(spec)])),
+      gateOnly: {},
+      failed: [],
+      pr: { description_quality: { score: 2 }, tests_cover_change: { noul: 1 } },
+    }) as unknown as Judgement;
+  const idsOf = (hunks: Hunk[], spec: Spec = { testLoosened: 0.9 }) =>
+    evaluate(hunks, judgementFor(hunks.map((entry) => entry.id), spec), DESCRIPTION, parsePolicy("")).flags.map(
+      (flag) => flag.findingId,
+    );
+  const testHunk = (id: string, content: string) => hunk(id, { path: "test/invoice.test.ts", isTest: true, content });
+
+  test("a finding keeps its id when a push moves the hunk without touching its changed lines", () => {
+    const moved = edit.replace("@@ -2,3 +2,3 @@", "@@ -40,3 +40,3 @@").replaceAll("context", "other context");
+    expect(idsOf([testHunk("t#1", moved)])).toEqual(idsOf([testHunk("t#0", edit)]));
+  });
+
+  test("a finding gets a new id when its changed lines change", () => {
+    const changed = edit.replace("toBeDefined()", "toBeGreaterThan(0)");
+    expect(idsOf([testHunk("t#0", changed)])).not.toEqual(idsOf([testHunk("t#0", edit)]));
+  });
+
+  test("two flags on one hunk, and the same edit twice in one file, all get different ids", () => {
+    const ids = idsOf([testHunk("t#0", edit), testHunk("t#1", edit)], { testLoosened: 0.9, commentDrift: 0.9 });
+    expect(new Set(ids).size).toBe(4);
+    expect(ids[2]).toBe(`${ids[0]}-2`);
   });
 });

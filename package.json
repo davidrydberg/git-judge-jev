@@ -5,6 +5,9 @@
   "private": true,
   "license": "MIT",
   "type": "module",
+  "bin": {
+    "git-judge-jev": "dist/index.cjs"
+  },
   "engines": {
     "node": ">=24"
   },
@@ -12,8 +15,9 @@
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
     "lint": "eslint .",
-    "build": "esbuild src/action.ts --bundle --platform=node --target=node24 --format=cjs --outfile=dist/index.cjs --legal-comments=none",
+    "build": "esbuild src/entry.ts --bundle --platform=node --target=node24 --format=cjs --outfile=dist/index.cjs --legal-comments=none --banner:js=\"#!/usr/bin/env node\"",
     "eval": "esbuild scripts/eval.ts --bundle --platform=node --format=esm --packages=external --log-level=warning --outfile=node_modules/.cache/git-judge-jev-eval.mjs && node --env-file=.env node_modules/.cache/git-judge-jev-eval.mjs",
+    "corpus": "esbuild scripts/corpus.ts --bundle --platform=node --format=esm --packages=external --log-level=warning --outfile=node_modules/.cache/git-judge-jev-corpus.mjs && node node_modules/.cache/git-judge-jev-corpus.mjs",
     "try": "esbuild scripts/try.ts --bundle --platform=node --format=esm --packages=external --log-level=warning --outfile=node_modules/.cache/git-judge-jev-try.mjs && node --env-file=.env node_modules/.cache/git-judge-jev-try.mjs"
   },
   "dependencies": {

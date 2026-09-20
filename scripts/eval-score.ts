@@ -3,19 +3,23 @@
 import type { Hunk } from "../src/diff.js";
 import type { ReportJson } from "../src/report.js";
 
-/** A hunk is named by its file and a string its diff contains, so a label survives a regenerated diff. */
-export interface HunkRef {
-  path: string;
-  contains: string;
-}
+/**
+ * A hunk is named by its file and a string its diff contains, so a label survives a regenerated diff.
+ * A label taken from GitHub, a review comment or a later fix, has a line on the new side instead.
+ */
+export type HunkRef = { path: string; contains: string } | { path: string; line: number };
 
 export interface EvalCase {
   title: string;
   description: string;
   /** Hunks a careful human reviewer has to read. The report should put them near the top. */
   mustRead: HunkRef[];
-  /** Findings that are true. A confirmed verdict that is not listed here or in `acceptable` is a false positive. */
-  flags: (HunkRef & { id: string })[];
+  /**
+   * Findings that are true. A confirmed verdict that is not listed here or in `acceptable` is a false positive.
+   * Absent on a case nobody has labelled findings for, a pull request from `npm run corpus`. Such a case
+   * is scored on ranking only, and its verdicts are printed to be labelled.
+   */
+  flags?: (HunkRef & { id: string })[];
   /** Verdicts that are defensible but not required. They count neither for nor against. */
   acceptable?: (HunkRef & { id: string })[];
 }
@@ -31,12 +35,19 @@ export interface CaseScore {
   truePositives: number;
   falsePositives: string[];
   missedFlags: string[];
+  /** Verdicts on a case with no flag labels. They count for nothing until a human says which are true. */
+  unlabelled: string[];
 }
 
 export function resolve(ref: HunkRef, hunks: Hunk[]): Hunk {
-  const found = hunks.filter((hunk) => hunk.path === ref.path && hunk.content.includes(ref.contains));
+  const found = hunks.filter(
+    (hunk) =>
+      hunk.path === ref.path &&
+      ("contains" in ref ? hunk.content.includes(ref.contains) : hunk.startLine <= ref.line && ref.line <= hunk.endLine),
+  );
   if (found.length !== 1) {
-    throw new Error(`"${ref.contains}" in ${ref.path} matches ${found.length} hunks, a label must match exactly one`);
+    const what = "contains" in ref ? `"${ref.contains}"` : `line ${ref.line}`;
+    throw new Error(`${what} in ${ref.path} matches ${found.length} hunks, a label must match exactly one`);
   }
   return found[0]!;
 }
@@ -51,9 +62,11 @@ export function scoreCase(spec: EvalCase, hunks: Hunk[], json: ReportJson): Case
 
   const key = (hunkId: string, id: string) => `${hunkId}|${id}`;
   const label = (ref: HunkRef & { id: string }) => key(resolve(ref, hunks).id, ref.id);
-  const expected = new Set(spec.flags.map(label));
+  const expected = new Set((spec.flags ?? []).map(label));
   const acceptable = new Set((spec.acceptable ?? []).map(label));
-  const raised = new Set(json.verdicts.map((verdict) => key(verdict.hunkId, verdict.flagId)));
+  // A verdict the writer called immaterial is not shown as a finding, so it is not scored as one.
+  const raised = new Set(json.verdicts.filter((verdict) => verdict.material).map((verdict) => key(verdict.hunkId, verdict.flagId)));
+  const labelled = spec.flags !== undefined;
 
   return {
     mustRead: spec.mustRead.length,
@@ -62,8 +75,9 @@ export function scoreCase(spec: EvalCase, hunks: Hunk[], json: ReportJson): Case
     ranks,
     expectedFlags: expected.size,
     truePositives: [...expected].filter((flag) => raised.has(flag)).length,
-    falsePositives: [...raised].filter((flag) => !expected.has(flag) && !acceptable.has(flag)),
+    falsePositives: labelled ? [...raised].filter((flag) => !expected.has(flag) && !acceptable.has(flag)) : [],
     missedFlags: [...expected].filter((flag) => !raised.has(flag)),
+    unlabelled: labelled ? [] : [...raised],
   };
 }
 

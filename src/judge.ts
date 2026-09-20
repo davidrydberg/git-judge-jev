@@ -5,7 +5,7 @@ import {
   type SystemOneResult,
 } from "@typesafe-ai/sdk";
 import type { Hunk } from "./diff.js";
-import { CODE_QUESTIONS, MISMATCH_QUESTIONS, PR_QUESTIONS } from "./questions.js";
+import { CODE_QUESTIONS, GATE_QUESTIONS, MISMATCH_QUESTIONS, PR_QUESTIONS } from "./questions.js";
 
 /** The slice of the TypeSafe SDK the judge uses. Tests pass a fake that records requests. */
 export interface JudgeClient {
@@ -39,8 +39,17 @@ export interface HunkAnswers {
   lowCoverage: boolean;
 }
 
+/** A hunk set aside by path as generated or vendored. It is asked the gate questions and nothing else. */
+export interface GateAnswers {
+  answers: Answers<typeof GATE_QUESTIONS>;
+  lowCoverage: boolean;
+}
+
 export interface Judgement {
   hunks: Record<string, HunkAnswers>;
+  gateOnly: Record<string, GateAnswers>;
+  /** Hunks whose requests still failed after the SDK's retries. They are reported, not judged. */
+  failed: string[];
   pr: Answers<typeof PR_QUESTIONS>;
   /** The versioned model id that answered, as reported by TypeSafe. */
   model: string;
@@ -60,6 +69,9 @@ const CHARS_PER_TOKEN = 3;
 const MAX_DESCRIPTION_CHARS = 6_000;
 const DEFAULT_CONCURRENCY = 8;
 const CUSTOM_PREFIX = "custom:";
+// One bad hunk must not cost the whole report, and an outage must not be retried hunk by hunk.
+// Past this many failures, with most finished requests failing, the run gives up.
+const MAX_TOLERATED_FAILURES = 5;
 
 export function createJudgeClient(apiKey: string): JudgeClient {
   // The SDK retries 408, 429, and 5xx (which covers 529 Overloaded) with backoff and honours
@@ -126,15 +138,51 @@ export async function judge(
     ];
   };
 
-  // Lockfile, generated, and vendored hunks never reach the model.
+  const judgeGates = async (hunk: Hunk): Promise<[string, GateAnswers]> => {
+    const { state, truncated } = fitDiff({ file: hunk.path, language: hunk.language }, hunk.content, GATE_QUESTIONS);
+    return [hunk.id, { answers: await ask(state, GATE_QUESTIONS), lowCoverage: truncated }];
+  };
+
+  const failed: string[] = [];
+  let finished = 0;
+  let lastError: unknown;
+  const tolerant =
+    <R>(fn: (hunk: Hunk) => Promise<R>) =>
+    async (hunk: Hunk): Promise<R | null> => {
+      try {
+        return await fn(hunk);
+      } catch (error) {
+        failed.push(hunk.id);
+        lastError = error;
+        if (failed.length > MAX_TOLERATED_FAILURES && failed.length * 2 > finished + 1) throw error;
+        return null;
+      } finally {
+        finished++;
+      }
+    };
+
+  // Lockfiles never reach the model. Generated and vendored hunks are asked the gate questions only.
   const judged = hunks.filter((hunk) => hunk.preClass === null);
-  const [perHunk, prAnswers] = await Promise.all([
-    mapPool(judged, options.concurrency ?? DEFAULT_CONCURRENCY, judgeHunk),
+  const gateOnly = hunks.filter((hunk) => hunk.preClass === "generated" || hunk.preClass === "vendored");
+  // One pool for both kinds, so the limit holds across them.
+  type Answered = { full: [string, HunkAnswers] | null; gates: [string, GateAnswers] | null };
+  const one = async (hunk: Hunk): Promise<Answered> =>
+    hunk.preClass === null
+      ? { full: await judgeHunk(hunk), gates: null }
+      : { full: null, gates: await judgeGates(hunk) };
+  const [answered, prAnswers] = await Promise.all([
+    mapPool([...judged, ...gateOnly], options.concurrency ?? DEFAULT_CONCURRENCY, tolerant(one)),
     ask(fitFileList({ title: pr.title, description }, pr.files), PR_QUESTIONS),
   ]);
+  const perHunk = answered.flatMap((entry) => (entry?.full ? [entry.full] : []));
+  const perGateHunk = answered.flatMap((entry) => (entry?.gates ? [entry.gates] : []));
+  // Every hunk failing is an outage, not a bad hunk.
+  if (failed.length > 0 && failed.length === judged.length + gateOnly.length) throw lastError;
 
   return {
     hunks: Object.fromEntries(perHunk),
+    gateOnly: Object.fromEntries(perGateHunk),
+    failed,
     pr: prAnswers,
     model: answeredBy,
     requests,
@@ -190,7 +238,7 @@ function fitFileList(
 }
 
 /** Maps with at most `limit` calls in flight. Stops starting new calls once one has failed. */
-async function mapPool<T, R>(items: T[], limit: number, fn: (item: T) => Promise<R>): Promise<R[]> {
+export async function mapPool<T, R>(items: T[], limit: number, fn: (item: T) => Promise<R>): Promise<R[]> {
   const results = new Array<R>(items.length);
   let next = 0;
   let failed = false;
